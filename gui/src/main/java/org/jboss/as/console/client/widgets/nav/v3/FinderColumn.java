@@ -108,6 +108,11 @@ public class FinderColumn<T> implements SecurityContextAware {
     private final PreviewFactory DEFAULT_PREVIEW = new PreviewFactory() {
         @Override
         public void createPreview(Object data, AsyncCallback callback) {
+            if (data == null) {
+                PreviewFactory.NO_SELECTION_PREVIEW(callback);
+                return;
+            }
+
             SafeHtmlBuilder builder = new SafeHtmlBuilder();
             String icon = display.isFolder(data) ? "icon-folder-close-alt" : "icon-file-text-alt";
             builder.appendHtmlConstant("<center><i class='"+icon+"' style='font-size:48px;top:100px;position:relative'></i></center>");
@@ -269,6 +274,10 @@ public class FinderColumn<T> implements SecurityContextAware {
 
                 // toggle row level tools
                 toggleRowLevelTools(() -> selectionModel.getSelectedObject() == null);
+
+                if (!hasSelectedItem()) {
+                    triggerEmptyPreviewEvent();
+                }
             }
         });
 
@@ -436,6 +445,21 @@ public class FinderColumn<T> implements SecurityContextAware {
 
         t.schedule(100);
 
+    }
+
+    private void triggerEmptyPreviewEvent() {
+        Scheduler.get().scheduleDeferred(() -> {
+
+            PlaceManager placeManager = Console.MODULES.getPlaceManager();
+
+            previewFactory.createPreview(null, new SimpleCallback<SafeHtml>() {
+                @Override
+                public void onSuccess(SafeHtml content) {
+                    PreviewEvent.fire(placeManager, content);
+                }
+            });
+
+        });
     }
 
     private void triggerBreadcrumbEvent(boolean isMenuEvent) {
@@ -818,7 +842,7 @@ public class FinderColumn<T> implements SecurityContextAware {
     public void updateFrom(final List<T> records, final boolean selectDefault) {
 
         if(filter!=null) filter.clear();
-        selectionModel.clear();
+        if (hasSelectedItem()) selectionModel.clear();
         /*cellTable.setRowCount(records.size(), true);
         cellTable.setRowData(0, records);*/
 

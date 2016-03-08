@@ -297,29 +297,35 @@ public class DomainRuntimeView extends SuspendableViewImpl implements DomainRunt
                 SafeHtmlBuilder html = new SafeHtmlBuilder();
                 html.appendHtmlConstant("<div class='preview-content'>");
 
-                html.appendHtmlConstant("<h2>");
-                html.appendEscaped("Server Configuration");
-                html.appendHtmlConstant("</h2>");
+                if (data != null) {
+                    html.appendHtmlConstant("<h2>");
+                    html.appendEscaped("Server Configuration");
+                    html.appendHtmlConstant("</h2>");
 
 
-                html.appendEscaped(Console.CONSTANTS.serverDescription());
+                    html.appendEscaped(Console.CONSTANTS.serverDescription());
 
-                // TODO: reload state
-                if (!data.isStarted()) {
-                    PreviewState.paused(html, "Server is stopped");
-                } else if (data.getServerState() == SrvState.RELOAD_REQUIRED) {
-                    PreviewState.warn(html, Console.CONSTANTS.server_instance_reloadRequired());
-                } else if (data.getServerState() == SrvState.RESTART_REQUIRED) {
-                    PreviewState.warn(html, "Server needs to be restarted");
-                } else if (data.getSuspendState() == SuspendState.SUSPENDED) {
-                    PreviewState.info(html, "Server is suspended");
-                } else if (data.getServerState() == SrvState.RUNNING) {
-                    String id = "port-offset-" + data.getGroup() + "-" + data.getName();
-                    html.appendHtmlConstant("<p>")
-                            .appendEscaped("Port offset: ")
-                            .appendHtmlConstant("<span id=\"" + id + "\">").appendHtmlConstant("</span>")
-                            .appendHtmlConstant("</p>");
-                    new ReadPortOffsetOp(dispatcher).execute(data, id);
+                    // TODO: reload state
+                    if (!data.isStarted()) {
+                        PreviewState.paused(html, "Server is stopped");
+                    } else if (data.getServerState() == SrvState.RELOAD_REQUIRED) {
+                        PreviewState.warn(html, Console.CONSTANTS.server_instance_reloadRequired());
+                    } else if (data.getServerState() == SrvState.RESTART_REQUIRED) {
+                        PreviewState.warn(html, "Server needs to be restarted");
+                    } else if (data.getSuspendState() == SuspendState.SUSPENDED) {
+                        PreviewState.info(html, "Server is suspended");
+                    } else if (data.getServerState() == SrvState.RUNNING) {
+                        String id = "port-offset-" + data.getGroup() + "-" + data.getName();
+                        html.appendHtmlConstant("<p>")
+                                .appendEscaped("Port offset: ")
+                                .appendHtmlConstant("<span id=\"" + id + "\">").appendHtmlConstant("</span>")
+                                .appendHtmlConstant("</p>");
+                        new ReadPortOffsetOp(dispatcher).execute(data, id);
+                    }
+                } else {
+                    html.appendHtmlConstant("<h2>");
+                    html.appendEscaped("No server selected");
+                    html.appendHtmlConstant("</h2>");
                 }
 
                 html.appendHtmlConstant("</div>");
@@ -563,6 +569,10 @@ public class DomainRuntimeView extends SuspendableViewImpl implements DomainRunt
         subsystemColumn.setPreviewFactory(new PreviewFactory<PlaceLink>() {
             @Override
             public void createPreview(PlaceLink data, AsyncCallback<SafeHtml> callback) {
+                if (data == null) {
+                    PreviewFactory.NO_SELECTION_PREVIEW(callback);
+                    return;
+                }
                 SafeHtmlBuilder builder = new SafeHtmlBuilder();
                 builder.appendHtmlConstant("<div class='preview-content'><span style='font-size:24px;'><i class='icon-bar-chart' style='font-size:48px;vertical-align:middle'></i>&nbsp;"+data.getTitle()+"</span></center>");
                 builder.appendHtmlConstant("</div>");
@@ -642,6 +652,8 @@ public class DomainRuntimeView extends SuspendableViewImpl implements DomainRunt
                         }
                     });
 
+                } else {
+                    columnManager.reduceColumnsTo(2);
                 }
             }
         });
