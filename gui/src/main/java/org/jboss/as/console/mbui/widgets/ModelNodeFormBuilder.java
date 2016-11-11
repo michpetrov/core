@@ -27,6 +27,8 @@ import org.jboss.ballroom.client.widgets.forms.ComboBoxItem;
 import org.jboss.ballroom.client.widgets.forms.DisclosureGroupRenderer;
 import org.jboss.ballroom.client.widgets.forms.DoubleFormItem;
 import org.jboss.ballroom.client.widgets.forms.FormItem;
+import org.jboss.ballroom.client.widgets.forms.FormValidation;
+import org.jboss.ballroom.client.widgets.forms.FormValidator;
 import org.jboss.ballroom.client.widgets.forms.ListItem;
 import org.jboss.ballroom.client.widgets.forms.NumberBoxItem;
 import org.jboss.ballroom.client.widgets.forms.PropertyListItem;
@@ -158,6 +160,222 @@ public class ModelNodeFormBuilder {
         return this;
     }
 
+    private void createFormItem(String attribute, Property attr, ItemHolder itemHolder, boolean isParentRequired) {
+        boolean isRuntime = attr.getValue().get("storage").asString().equals("runtime");
+        boolean isConfig = !attr.getValue().get("storage").asString()
+                .equals("runtime"); // TODO: verify statement
+
+        if (runtimeAttributes == false && isRuntime) {
+            return;
+        }
+
+        if (configAttributes == false && isConfig) {
+            return;
+        }
+
+        if (!attr.getName().equals(attribute)) { return; }
+
+        // -------
+        // Attribute meta data
+
+        // name
+        char[] attrName = attr.getName().toCharArray();
+        attrName[0] = Character.toUpperCase(attrName[0]);
+
+        // field label
+        String label = new String(attrName).replace("-", " ").replaceAll("\\.", " - ");
+        ModelNode attrDesc = attr.getValue();
+
+        // skip deprecated attributes
+        if (attrDesc.hasDefined("deprecated")) {
+            //Log.error("Skip deprecated attribute '" + attr.getName() + "'");
+            return;
+        }
+
+        // type
+        ModelType type = ModelType.valueOf(attrDesc.get("type").asString().toUpperCase());
+
+        // default value
+        if (attrDesc.hasDefined("default")) {
+            ModelNode defaultValue = attrDesc.get("default");
+            ModelNode value = new ModelNode();
+            //value.set(type, ModelNodeForm.downCast(defaultValue));
+            setValue(value, type,
+                    ModelNodeForm.downCast(defaultValue, attrDesc)); // workaround for numeric types
+
+
+            itemHolder.getDefaultValues().put(attr.getName(), value);
+        }
+
+
+        // read-only
+        final boolean readOnly = attrDesc.hasDefined("access-type") ?
+                attrDesc.get("access-type").asString().equals("read-only") : false;
+
+        // nillable
+        boolean isRequired = isRequired(attrDesc) && isParentRequired;
+        if (isRequired(attrDesc) && !isRequired) {
+            // required item of nillable parent
+            itemHolder.getRequiredSubAttributes().add(attr.getName());
+        }
+
+        // createMode flag
+        if ((createMode && readOnly)) { return; }
+
+        // requiredOnly flag
+        if (requiredOnly && itemHolder.hasRequired() && !isRequired) { return; }
+
+
+        // count writable attributes
+        if (!readOnly && !isRuntime) { itemHolder.incrementNumWritable(); }
+
+        // -------
+        // help
+
+        SafeHtmlBuilder helpTexts = itemHolder.getHelpTexts();
+        helpTexts.appendHtmlConstant("<tr class='help-field-row'>");
+        helpTexts.appendHtmlConstant("<td class='help-field-name'>");
+        helpTexts.appendEscaped(label).appendEscaped(": ");
+        helpTexts.appendHtmlConstant("</td>");
+        helpTexts.appendHtmlConstant("<td class='help-field-desc'>");
+        try {
+            String descWorkaround = attrDesc.get("description").asString();
+
+            helpTexts.appendHtmlConstant(descWorkaround.equals("null") ? "n/a" : descWorkaround);
+        } catch (Throwable e) {
+            // ignore parse errors
+            helpTexts.appendHtmlConstant("<i>Failed to parse description</i>");
+        }
+        helpTexts.appendHtmlConstant("</td>");
+        helpTexts.appendHtmlConstant("</tr>");
+
+        FormItem formItem = null;
+
+        // explicitly created form items (monkey patching)
+        if (itemFactories.containsKey(attr.getName())) {
+            formItem = itemFactories.get(attr.getName()).create(attr);
+        }
+
+        // not created by explicit factory
+        if (null == formItem) {
+            switch (type) {
+                case BOOLEAN:
+                    formItem = new CheckBoxItem(attr.getName(), label);
+                    formItem.setRequired(isRequired);
+                    formItem.setEnabled(!readOnly && !isRuntime);
+                    break;
+                case DOUBLE:
+                    formItem = new DoubleFormItem(attr.getName(), label);
+                    formItem.setRequired(isRequired);
+                    formItem.setEnabled(!readOnly && !isRuntime);
+                    break;
+                case LONG:
+                    boolean allowNegativeValues = false;
+                    if (attrDesc.hasDefined("default")) {
+                        allowNegativeValues = attrDesc.get("default").asLong() < 0;
+                    }
+
+                    formItem = new NumberBoxItem(attr.getName(), label, allowNegativeValues);
+                    formItem.setRequired(isRequired);
+                    formItem.setEnabled(!readOnly && !isRuntime);
+                    break;
+                case BIG_DECIMAL:
+                    formItem = new NumberBoxItem(attr.getName(), label);
+                    formItem.setRequired(isRequired);
+                    formItem.setEnabled(!readOnly && !isRuntime);
+                    break;
+                case INT:
+                    if (attrDesc.hasDefined("min") && attrDesc.hasDefined("max")) {
+                        formItem = new NumberBoxItem(
+                                attr.getName(), label,
+                                attrDesc.get("min").asLong(),
+                                attrDesc.get("max").asLong()
+                        );
+                    } else {
+                        formItem = new NumberBoxItem(attr.getName(), label);
+                    }
+
+                    formItem.setRequired(isRequired);
+                    formItem.setEnabled(!readOnly && !isRuntime);
+
+
+                    break;
+                case LIST:
+                    formItem = new ListItem(attr.getName(), label);
+                    formItem.setRequired(isRequired);
+                    formItem.setEnabled(!readOnly && !isRuntime);
+                    break;
+                case STRING:
+                    if (attrDesc.get("allowed").isDefined()) {
+                        List<ModelNode> allowed = attrDesc.get("allowed").asList();
+                        Set<String> allowedValues = new HashSet<String>(allowed.size());
+                        for (ModelNode value : allowed) { allowedValues.add(value.asString()); }
+
+                        final boolean isNillable = attrDesc.hasDefined(NILLABLE) && attrDesc.get(NILLABLE)
+                                .asBoolean() && itemHolder.getDefaultValues().isEmpty() || !isParentRequired;
+                        ComboBoxItem combo = new ComboBoxItem(attr.getName(), label, isNillable);
+                        combo.setValueMap(allowedValues);
+                        combo.setEnabled(!readOnly && !isRuntime);
+                        combo.setRequired(isRequired);
+
+                        formItem = combo;
+                    } else {
+                        formItem = createSuggestBoxForCapabilityReference(attr, label, isRequired);
+                        if (formItem == null) {
+                            // there is no capability-reference
+                            TextBoxItem textBoxItem = new TextBoxItem(attr.getName(), label);
+                            textBoxItem.setAllowWhiteSpace(true);
+
+                            textBoxItem.setRequired(isRequired);
+                            textBoxItem.setEnabled(!readOnly && !isRuntime);
+
+                            formItem = textBoxItem;
+                        }
+                    }
+
+                    // TODO: Support for TextAreaItem
+
+                    break;
+                case OBJECT:
+                    if (attrDesc.has("value-type") && attrDesc.get("value-type").asString().equals("STRING")) {
+                        PropertyListItem propList = new PropertyListItem(attr.getName(), label);
+                        propList.setRequired(isRequired);
+                        propList.setEnabled(!readOnly && !isRuntime);
+
+                        formItem = propList;
+                        break;
+                    } else if (attrDesc.has("value-type")) {
+                        itemHolder.decrementNumWritable();
+                        List<Property> list = attrDesc.get("value-type").asPropertyList();
+                        for (Property prop : list) {
+                            String nestedName = attr.getName() + "." + prop.getName();
+                            Property nestedAttr = new Property(nestedName, prop.getValue());
+                            createFormItem(nestedName, nestedAttr, itemHolder, isRequired);
+                        }
+                        break;
+                    }
+                default: {
+                    itemHolder.getUnsupportedTypes().add(new String[]{attr.getName(), type.toString()});
+                    Log.error("Unsupported ModelType " + type + ", attribute '" + attr.getName() + "'");
+                }
+            }
+        }
+
+        if (formItem != null) {
+            if (createMode) {
+                if (isRequired && includeOptionals) { itemHolder.getRequiredItems().add(formItem); } else {
+                    itemHolder.getOptionalItems().add(formItem);
+                }
+            } else {
+                itemHolder.getRequiredItems().add(formItem);
+            }
+
+
+            // attribute meta data attached to form item
+            formItem.setMetadata(attrDesc);
+        }
+    }
+
     public FormAssets build() {
 
         // pre-requisite
@@ -200,14 +418,10 @@ public class ModelNodeFormBuilder {
         // in any case remove attributes marked for exclusion
         includes.removeAll(excludes);
 
-
-        LinkedList<FormItem> requiredItems = new LinkedList<FormItem>();
-        LinkedList<FormItem> optionalItems = new LinkedList<FormItem>();
-
         SafeHtmlBuilder helpTexts = new SafeHtmlBuilder();
         helpTexts.appendHtmlConstant("<table class='help-attribute-descriptions'>");
 
-        Map<String, ModelNode> defaultValues = new HashMap<String, ModelNode>();
+
         int numWritable = 0;
 
         boolean hasRequired = false;
@@ -226,213 +440,15 @@ public class ModelNodeFormBuilder {
             }
         }
 
-        Set<String[]> unsupportedTypes = new HashSet<>();
+        ItemHolder itemHolder = new ItemHolder(hasRequired, helpTexts);
         for (String attribute : includes) {
             for (Property attr : attributeDescriptions) {
-
-                boolean isRuntime = attr.getValue().get("storage").asString().equals("runtime");
-                boolean isConfig = !attr.getValue().get("storage").asString()
-                        .equals("runtime"); // TODO: verify statement
-
-                if (runtimeAttributes == false && isRuntime) {
-                    continue;
-                }
-
-                if (configAttributes == false && isConfig) {
-                    continue;
-                }
-
-                if (!attr.getName().equals(attribute)) { continue; }
-
-                // -------
-                // Attribute meta data
-
-                // name
-                char[] attrName = attr.getName().toCharArray();
-                attrName[0] = Character.toUpperCase(attrName[0]);
-
-                // field label
-                String label = new String(attrName).replace("-", " ");
-                ModelNode attrDesc = attr.getValue();
-
-                // skip deprecated attributes
-                if (attrDesc.hasDefined("deprecated")) {
-                    //Log.error("Skip deprecated attribute '" + attr.getName() + "'");
-                    continue;
-                }
-
-                // type
-                ModelType type = ModelType.valueOf(attrDesc.get("type").asString().toUpperCase());
-
-                // default value
-                if (attrDesc.hasDefined("default")) {
-                    ModelNode defaultValue = attrDesc.get("default");
-                    ModelNode value = new ModelNode();
-                    //value.set(type, ModelNodeForm.downCast(defaultValue));
-                    setValue(value, type,
-                            ModelNodeForm.downCast(defaultValue, attrDesc)); // workaround for numeric types
-
-
-                    defaultValues.put(attr.getName(), value);
-                }
-
-
-                // read-only
-                final boolean readOnly = attrDesc.hasDefined("access-type") ?
-                        attrDesc.get("access-type").asString().equals("read-only") : false;
-
-                // nillable
-                boolean isRequired = isRequired(attrDesc);
-
-                // createMode flag
-                if ((createMode && readOnly)) { continue; }
-
-                // requiredOnly flag
-                if (requiredOnly && hasRequired && !isRequired) { continue; }
-
-
-                // count writable attributes
-                if (!readOnly && !isRuntime) { numWritable++; }
-
-                // -------
-                // help
-
-                helpTexts.appendHtmlConstant("<tr class='help-field-row'>");
-                helpTexts.appendHtmlConstant("<td class='help-field-name'>");
-                helpTexts.appendEscaped(label).appendEscaped(": ");
-                helpTexts.appendHtmlConstant("</td>");
-                helpTexts.appendHtmlConstant("<td class='help-field-desc'>");
-                try {
-                    String descWorkaround = attrDesc.get("description").asString();
-
-                    helpTexts.appendHtmlConstant(descWorkaround.equals("null") ? "n/a" : descWorkaround);
-                } catch (Throwable e) {
-                    // ignore parse errors
-                    helpTexts.appendHtmlConstant("<i>Failed to parse description</i>");
-                }
-                helpTexts.appendHtmlConstant("</td>");
-                helpTexts.appendHtmlConstant("</tr>");
-
-                FormItem formItem = null;
-
-                // explicitly created form items (monkey patching)
-                if (itemFactories.containsKey(attr.getName())) {
-                    formItem = itemFactories.get(attr.getName()).create(attr);
-                }
-
-                // not created by explicit factory
-                if (null == formItem) {
-                    switch (type) {
-                        case BOOLEAN:
-                            formItem = new CheckBoxItem(attr.getName(), label);
-                            formItem.setRequired(isRequired);
-                            formItem.setEnabled(!readOnly && !isRuntime);
-                            break;
-                        case DOUBLE:
-                            formItem = new DoubleFormItem(attr.getName(), label);
-                            formItem.setRequired(isRequired);
-                            formItem.setEnabled(!readOnly && !isRuntime);
-                            break;
-                        case LONG:
-                            boolean allowNegativeValues = false;
-                            if (attrDesc.hasDefined("default")) {
-                                allowNegativeValues = attrDesc.get("default").asLong() < 0;
-                            }
-
-                            formItem = new NumberBoxItem(attr.getName(), label, allowNegativeValues);
-                            formItem.setRequired(isRequired);
-                            formItem.setEnabled(!readOnly && !isRuntime);
-                            break;
-                        case BIG_DECIMAL:
-                            formItem = new NumberBoxItem(attr.getName(), label);
-                            formItem.setRequired(isRequired);
-                            formItem.setEnabled(!readOnly && !isRuntime);
-                            break;
-                        case INT:
-                            if (attrDesc.hasDefined("min") && attrDesc.hasDefined("max")) {
-                                formItem = new NumberBoxItem(
-                                        attr.getName(), label,
-                                        attrDesc.get("min").asLong(),
-                                        attrDesc.get("max").asLong()
-                                );
-                            } else {
-                                formItem = new NumberBoxItem(attr.getName(), label);
-                            }
-
-                            formItem.setRequired(isRequired);
-                            formItem.setEnabled(!readOnly && !isRuntime);
-
-
-                            break;
-                        case LIST:
-                            formItem = new ListItem(attr.getName(), label);
-                            formItem.setRequired(isRequired);
-                            formItem.setEnabled(!readOnly && !isRuntime);
-                            break;
-                        case STRING:
-                            if (attrDesc.get("allowed").isDefined()) {
-                                List<ModelNode> allowed = attrDesc.get("allowed").asList();
-                                Set<String> allowedValues = new HashSet<String>(allowed.size());
-                                for (ModelNode value : allowed) { allowedValues.add(value.asString()); }
-
-                                final boolean isNillable = attrDesc.hasDefined(NILLABLE) && attrDesc.get(NILLABLE)
-                                        .asBoolean() && defaultValues.isEmpty();
-                                ComboBoxItem combo = new ComboBoxItem(attr.getName(), label, isNillable);
-                                combo.setValueMap(allowedValues);
-                                combo.setEnabled(!readOnly && !isRuntime);
-                                combo.setRequired(isRequired);
-
-                                formItem = combo;
-                            } else {
-                                formItem = createSuggestBoxForCapabilityReference(attr, label, isRequired);
-                                if (formItem == null) {
-                                    // there is no capability-reference
-                                    TextBoxItem textBoxItem = new TextBoxItem(attr.getName(), label);
-                                    textBoxItem.setAllowWhiteSpace(true);
-
-                                    textBoxItem.setRequired(isRequired);
-                                    textBoxItem.setEnabled(!readOnly && !isRuntime);
-
-                                    formItem = textBoxItem;
-                                }
-                            }
-
-                            // TODO: Support for TextAreaItem
-
-                            break;
-                        case OBJECT:
-                            if (attrDesc.has("value-type") && attrDesc.get("value-type").asString().equals("STRING")) {
-                                PropertyListItem propList = new PropertyListItem(attr.getName(), label);
-                                propList.setRequired(isRequired);
-                                propList.setEnabled(!readOnly && !isRuntime);
-
-                                formItem = propList;
-                                break;
-                            }
-                        default: {
-                            unsupportedTypes.add(new String[]{attr.getName(), type.toString()});
-                            Log.error("Unsupported ModelType " + type + ", attribute '" + attr.getName() + "'");
-                        }
-                    }
-                }
-
-                if (formItem != null) {
-                    if (createMode) {
-                        if (isRequired && includeOptionals) { requiredItems.add(formItem); } else {
-                            optionalItems.add(formItem);
-                        }
-                    } else {
-                        requiredItems.add(formItem);
-                    }
-
-
-                    // attribute meta data attached to form item
-                    formItem.setMetadata(attrDesc);
-                }
-
+                createFormItem(attribute, attr, itemHolder, true);
             }
         }
 
+        LinkedList<FormItem> requiredItems = itemHolder.getRequiredItems();
+        LinkedList<FormItem> optionalItems = itemHolder.getOptionalItems();
 
         // some resources already contain a name attribute
         FormItem nameItem = null;
@@ -464,7 +480,7 @@ public class ModelNodeFormBuilder {
                 final TextBoxItem nameBox = new TextBoxItem("name", "Name", true);
                 nameBox.setAllowWhiteSpace(true);
                 optionalItems.addFirst(nameBox);
-                numWritable++;
+                itemHolder.incrementNumWritable();
             }
             form.setFields(optionalItems.toArray(new FormItem[]{}));
         } else {
@@ -484,11 +500,57 @@ public class ModelNodeFormBuilder {
         }
 
         // form meta data
-        form.setDefaults(defaultValues);
-        form.setHasWritableAttributes(numWritable > 0);
+        form.setDefaults(itemHolder.getDefaultValues());
+        form.setHasWritableAttributes(itemHolder.getNumWritable() > 0);
+        form.addFormValidator(new FormValidator() {
 
-        FormAssets formAssets = new FormAssets(form, helpTexts.toSafeHtml());
-        formAssets.setUnsupportedTypes(unsupportedTypes);
+            @Override
+            public void validate(List<FormItem> formItems, FormValidation outcome) {
+
+                /* validate complex types */
+                List<FormItem> undefinedItems = new ArrayList<>();
+                List<String> names = new ArrayList<>();
+                String currentParentName = "";
+                int totalItems = 0;
+                for (FormItem item : formItems) {
+                    if (!itemHolder.getRequiredSubAttributes().contains(item.getName())) {
+                        continue;
+                    }
+
+                    // for each group of sub-attributes check if all required sibling are defined or none of them is, if not mark all undefined as errors
+                    String parentName = item.getName().substring(0, item.getName().indexOf("."));
+                    if (!parentName.equals(currentParentName)) {
+                        // next group, check previous
+                        if (undefinedItems.size() != 0 || undefinedItems.size() != totalItems) {
+                            markAllErrors(undefinedItems, names, outcome);
+                        }
+                        currentParentName = parentName;
+                        undefinedItems = new ArrayList<>();
+                        names = new ArrayList<>();
+                    }
+
+                    if (item.isUndefined()) {
+                        undefinedItems.add(item);
+                    }
+                    names.add(item.getTitle());
+                    totalItems++;
+                }
+                if (undefinedItems.size() != 0 || undefinedItems.size() != totalItems) {
+                    markAllErrors(undefinedItems, names, outcome);
+                }
+            }
+
+            private void markAllErrors(List<FormItem> undefinedItems, List<String> names, FormValidation outcome) {
+                for (FormItem fi : undefinedItems) {
+                    outcome.addError(fi.getName());
+                    fi.setErrMessage("Value cannot be empty. Each or none of [" + names.toArray() + "] has to be defined");
+                    fi.setErroneous(true);
+                }
+            }
+        });
+
+        FormAssets formAssets = new FormAssets(form, itemHolder.getHelpTexts().toSafeHtml());
+        formAssets.setUnsupportedTypes(itemHolder.getUnsupportedTypes());
         return formAssets;
     }
 
@@ -610,6 +672,63 @@ public class ModelNodeFormBuilder {
             target.setEmptyObject();
         }
 
+    }
+
+    private class ItemHolder {
+
+        private int numWritable = 0;
+        private boolean hasRequired;
+        private Set<String[]> unsupportedTypes = new HashSet<>();
+        private Map<String, ModelNode> defaultValues = new HashMap<String, ModelNode>();
+        private SafeHtmlBuilder helpTexts;
+        private LinkedList<FormItem> requiredItems = new LinkedList<FormItem>();
+        private LinkedList<FormItem> optionalItems = new LinkedList<FormItem>();
+        private List<String> requiredSubAttributes = new ArrayList<>();
+
+        public ItemHolder(boolean hasRequired, SafeHtmlBuilder helpTexts) {
+            this.hasRequired = hasRequired;
+            this.helpTexts = helpTexts;
+        }
+
+        public int getNumWritable() {
+            return numWritable;
+        }
+
+        public void incrementNumWritable() {
+            numWritable++;
+        }
+
+        public void decrementNumWritable() {
+            numWritable--;
+        }
+
+        public boolean hasRequired() {
+            return hasRequired;
+        }
+
+        public Set<String[]> getUnsupportedTypes() {
+            return unsupportedTypes;
+        }
+
+        public Map<String, ModelNode> getDefaultValues() {
+            return defaultValues;
+        }
+
+        public SafeHtmlBuilder getHelpTexts() {
+            return helpTexts;
+        }
+
+        public LinkedList<FormItem> getRequiredItems() {
+            return requiredItems;
+        }
+
+        public LinkedList<FormItem> getOptionalItems() {
+            return optionalItems;
+        }
+
+        public List<String> getRequiredSubAttributes() {
+            return requiredSubAttributes;
+        }
     }
 
 }

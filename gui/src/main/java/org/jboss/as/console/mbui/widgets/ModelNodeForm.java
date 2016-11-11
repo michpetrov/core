@@ -3,6 +3,7 @@ package org.jboss.as.console.mbui.widgets;
 import org.jboss.ballroom.client.rbac.SecurityContext;
 import org.jboss.ballroom.client.widgets.forms.AbstractForm;
 import org.jboss.ballroom.client.widgets.forms.FormItem;
+import org.jboss.ballroom.client.widgets.forms.FormValidation;
 import org.jboss.ballroom.client.widgets.forms.PlainFormView;
 import org.jboss.dmr.client.ModelNode;
 import org.jboss.dmr.client.ModelType;
@@ -92,6 +93,12 @@ public class ModelNodeForm extends AbstractForm<ModelNode> {
                     if (ModelType.PROPERTY == modelType) {
                         setItemValue(propertyName, value, exprMap);
                         return true;
+                    }
+                } else { // todo: might need a better check
+                    List<Property> nestedValues = value.asPropertyList();
+                    for (Property prop : nestedValues) {
+                        String nestedName = propertyName + "." + prop.getName();
+                        setItemValue(nestedName, prop.getValue(), exprMap);
                     }
                 }
 
@@ -351,10 +358,10 @@ public class ModelNodeForm extends AbstractForm<ModelNode> {
     public Map<String, Object> getChangedValues() {
 
         final Map<String,Object> changedValues = new HashMap<String, Object>();
-        final ModelNode src = editedEntity == null ? new ModelNode() : editedEntity;
-        final ModelNode dest = getUpdatedEntity();
+        final ModelNode src = getFlatModelNode(editedEntity == null ? new ModelNode() : editedEntity);
+        final ModelNode dest = getFlatModelNode(getUpdatedEntity());
 
-        ModelNodeInspector inspector = new ModelNodeInspector(this.getUpdatedEntity());
+        ModelNodeInspector inspector = new ModelNodeInspector(dest);
         inspector.accept(
                 new ModelNodeVisitor()
                 {
@@ -418,7 +425,13 @@ public class ModelNodeForm extends AbstractForm<ModelNode> {
                     @Override
                     public void visit(FormItem item) {
 
-                        ModelNode node = updatedModel.get(item.getName());
+                        ModelNode node = updatedModel;
+                        // handle nested nodes
+                        String[] names = item.getName().split("\\.");
+                        for (String name : names) {
+                            node = node.get(name);
+                        }
+
                         Object obj = item.getValue();
                         Class baseType = obj.getClass();
 
@@ -501,7 +514,76 @@ public class ModelNodeForm extends AbstractForm<ModelNode> {
             }
         }
 
-        return updatedModel;
+        return removeUndefinedChildren(updatedModel);
+    }
+
+    private ModelNode removeUndefinedChildren(ModelNode node) {
+        /*
+         * if a complex attribute contains only undefined attributes it has to be undefined
+         *
+         * original:
+         * {
+         *  "parent" => { "child1" => undefined, "child2" => undefined }
+         * }
+         *
+         * new:
+         * {
+         *  "parent" => undefined
+         * }
+         */
+        List<Property> propertyList = node.asPropertyList();
+        for (Property prop : propertyList) {
+            if (prop.getValue().getType() == ModelType.OBJECT) {
+                ModelNode nestedNode = removeUndefinedChildren(prop.getValue());
+                List<Property> nestedPropertyList = nestedNode.asPropertyList();
+                boolean allUndefined = true;
+                for (Property nestedProp : nestedPropertyList) {
+                    if (nestedProp.getValue().getType() != ModelType.UNDEFINED) {
+                        allUndefined = false;
+                        break;
+                    }
+                }
+                if (allUndefined) {
+                    node.get(prop.getName()).clear();
+                }
+            }
+        }
+
+        return node;
+    }
+
+    private ModelNode getFlatModelNode(ModelNode node) {
+        /*
+         * moves all nested attributes to first level
+         * for easier comparison in getChangedValues()
+         *
+         * this format is supported by DMR but only for editing (not adding new objects)
+         *
+         * original:
+         * {
+         *  "parent" => { "child1" => "value1", "child2" => "value2" }
+         * }
+         *
+         * flat:
+         * {
+         *  "parent.child1" => "value1",
+         *  "parent.child2" => "value2"
+         * }
+         */
+        ModelNode clone = node.clone();
+        List<Property> propertyList = clone.asPropertyList();
+        for (Property prop : propertyList) {
+            if (prop.getValue().getType() == ModelType.OBJECT) {
+                ModelNode nestedNode = getFlatModelNode(prop.getValue());
+                List<Property> nestedPropertyList = nestedNode.asPropertyList();
+                for (Property nestedProp : nestedPropertyList) {
+                    ModelNode newNode = clone.get(prop.getName() + "." + nestedProp.getName());
+                    newNode.set(nestedProp.getValue());
+                }
+                clone.remove(prop.getName());
+            }
+        }
+        return clone;
     }
 
     @Override
@@ -566,7 +648,6 @@ public class ModelNodeForm extends AbstractForm<ModelNode> {
         void visit(FormItem item);
     }
 
-
     // ---- deprecated, blow up -----
 
     @Override
@@ -577,7 +658,4 @@ public class ModelNodeForm extends AbstractForm<ModelNode> {
     public void setHasWritableAttributes(boolean hasWritableAttributes) {
         this.hasWritableAttributes = hasWritableAttributes;
     }
-
-
 }
-
